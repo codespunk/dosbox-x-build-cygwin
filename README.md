@@ -11,6 +11,7 @@ Build native 32-bit and 64-bit Windows versions of DOSBox-X from Cygwin using Mi
 - Supports incremental builds without rerunning configuration or rebuilding bundled libraries by default.
 - Supports compiling individual DOSBox-X components without linking the executable.
 - Can rebuild bundled SDL, SDL_net, or libpng on request.
+- Can strip debugging information from `src/dosbox-x.exe` using MinGW-w64.
 
 ## Installation
 
@@ -79,12 +80,30 @@ These library options invoke the bundled library build scripts; they do not comp
 
 After testing a component, run `./build-cygwin -i` to perform the complete incremental compilation and link. Component-only compilation cannot detect every cross-component or final-link error.
 
+### Stripping debugging information
+
+Use `--strip` to remove debugging information from the Windows executable:
+
+```sh
+./build-cygwin --strip           # Strip an existing 64-bit executable
+./build-cygwin 32 --strip        # Strip an existing 32-bit executable
+./build-cygwin -i --strip        # Incremental build, then strip
+./build-cygwin 32 -i --strip     # 32-bit incremental build, then strip
+```
+
+The executable must exist at `src/dosbox-x.exe`. The helper uses the
+architecture-specific MinGW-w64 `strip` utility with `--strip-debug`.
+When `--strip` is used alone, no build or configuration is performed.
+It can also be added to a full build. It cannot be combined with
+`--only-*` because those operations do not link the final executable.
+
 ## Options
 
 ```text
   32                 Target 32-bit Windows (i686-w64-mingw32).
                      Default: 64-bit Windows (x86_64-w64-mingw32).
   -i, --incremental  Build changed files using the existing configuration.
+  --strip            Remove debug information from src/dosbox-x.exe.
   --with-sdl         Also rebuild bundled SDL and SDL_net.
   --with-libpng      Also rebuild bundled static libpng.
   --only-NAME        Compile only src/NAME without linking DOSBox-X.
@@ -94,7 +113,7 @@ After testing a component, run `./build-cygwin -i` to perform the complete incre
   -h, --help         Show usage information and exit.
 ```
 
-The `--with-*` options are for incremental builds. `--only-*` options cannot be combined with `--with-*` options or with each other. Additional configure options are accepted only for full builds.
+The `--with-*` options are for incremental builds. `--only-*` options cannot be combined with `--with-*`, `--strip`, or with each other. Additional configure options are accepted only for full builds.
 
 ## Requirements
 

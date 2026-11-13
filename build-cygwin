@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Build native Windows binaries using MinGW-w64 from Cygwin.
-# Usage: ./build-cygwin [32] [-i|--incremental] [--with-sdl] [--with-libpng] [--only-COMPONENT] [configure options...]
+# Usage: ./build-cygwin [32] [options] [configure options...]
 #        ./build-cygwin --help
 set -e
 
@@ -15,6 +15,8 @@ Build DOSBox-X for 32-bit or 64-bit Windows from Cygwin using MinGW-w64.
 Options:
   32                 Target 32-bit Windows (i686-w64-mingw32).
                      Default: 64-bit Windows (x86_64-w64-mingw32).
+  --strip            Strip debug information from src/dosbox-x.exe.
+                     Alone: strip an existing executable without building.
   -h, --help         Display this help message and exit.
 
 Incremental Builds:
@@ -28,27 +30,19 @@ Component Builds:
   --only-sdlnet      Rebuild bundled SDL_net only.
   --only-libpng      Rebuild bundled static libpng only.
 
-Additional Information:
-  Full builds check dependencies, configure the toolchain, patch SDL when
-  necessary, and build bundled libraries before compiling DOSBox-X.
-
-  Incremental builds skip dependency checks and bundled libraries unless
-  explicitly requested. Component builds are incremental and do not link
-  the final executable.
-
-  Additional configure options are forwarded to the repository's ./build.
+Additional configure options are forwarded to the repository's ./build.
+Full builds check dependencies and configure the toolchain. Incremental
+builds use the existing configuration and skip package preflight checks.
 
 Examples:
   ./build-cygwin                     Full 64-bit build
   ./build-cygwin 32                  Full 32-bit build
   ./build-cygwin -i                  Incremental 64-bit build
-  ./build-cygwin 32 -i               Incremental 32-bit build
-  ./build-cygwin -i --with-sdl       Incremental build, rebuild SDL/SDL_net
-  ./build-cygwin -i --with-libpng    Incremental build, rebuild libpng
   ./build-cygwin --only-cpu          Compile CPU component only
-  ./build-cygwin --only-dos          Compile DOS component only
   ./build-cygwin --only-sdl          Rebuild SDL and SDL_net only
-  ./build-cygwin --only-libpng       Rebuild libpng only
+  ./build-cygwin --strip             Strip existing executable
+  ./build-cygwin -i --strip          Incremental build, then strip
+  ./build-cygwin 32 --strip -i       32-bit incremental build, then strip
 EOF
 }
 
@@ -57,12 +51,15 @@ incremental=no
 with_sdl=no
 with_libpng=no
 only_component=""
+strip_executable=no
+build_requested=no
 configure_args=()
 for arg in "$@"; do
     case "$arg" in
         -h|--help) show_help; exit 0 ;;
         32) build32=yes ;;
-        -i|--incremental) incremental=yes ;;
+        --strip) strip_executable=yes ;;
+        -i|--incremental) incremental=yes; build_requested=yes ;;
         --only-*)
             if [ -n "$only_component" ]; then
                 echo "Specify only one --only-COMPONENT option." >&2
@@ -70,10 +67,11 @@ for arg in "$@"; do
             fi
             only_component="${arg#--only-}"
             incremental=yes
+            build_requested=yes
             ;;
-        --with-sdl) with_sdl=yes ;;
-        --with-libpng|--width-libpng) with_libpng=yes ;;
-        *) configure_args+=("$arg") ;;
+        --with-sdl) with_sdl=yes; build_requested=yes ;;
+        --with-libpng|--width-libpng) with_libpng=yes; build_requested=yes ;;
+        *) configure_args+=("$arg"); build_requested=yes ;;
     esac
 done
 
@@ -251,6 +249,33 @@ else
     arch=x86_64
 fi
 triplet="${arch}-w64-mingw32"
+
+strip_dosbox_executable() {
+    local executable="src/dosbox-x.exe"
+    local strip_tool="${triplet}-strip"
+
+    if [ ! -f "$executable" ]; then
+        echo "Cannot strip: executable not found: $executable" >&2
+        return 1
+    fi
+    if ! command -v "$strip_tool" >/dev/null 2>&1; then
+        echo "Cannot strip: missing MinGW-w64 tool: $strip_tool" >&2
+        return 1
+    fi
+    echo "Stripping debug information from $executable ($triplet)"
+    "$strip_tool" --strip-debug "$executable"
+}
+
+# --strip alone operates on an existing executable, without configuring
+# or building. Do not strip after a component-only compile operation.
+if [ "$strip_executable" = yes ] && [ "$build_requested" = no ]; then
+    strip_dosbox_executable
+    exit $?
+fi
+if [ "$strip_executable" = yes ] && [ -n "$only_component" ]; then
+    echo "--strip cannot be combined with --only-COMPONENT." >&2
+    exit 1
+fi
 mingw_prefix="/usr/$triplet/sys-root/mingw"
 
 if [ "$incremental" != yes ]; then
@@ -364,7 +389,13 @@ if [ "$incremental" = yes ]; then
     fi
 
     echo "Incrementally building DOSBox-X for $triplet"
-    exec make --no-print-directory -j"$(nproc)"
+    if [ "$strip_executable" = yes ]; then
+        make --no-print-directory -j"$(nproc)"
+        strip_dosbox_executable
+    else
+        exec make --no-print-directory -j"$(nproc)"
+    fi
+    exit $?
 fi
 
 apply_sdl_compat_patch || exit 1
@@ -374,3 +405,6 @@ echo "Compiling our internal libpng"
 
 # Do not forward '32': the original ./build treats it as a Linux -m32 build.
 ./build "--host=$triplet" "${configure_args[@]}"
+if [ "$strip_executable" = yes ]; then
+    strip_dosbox_executable
+fi
