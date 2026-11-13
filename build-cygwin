@@ -19,7 +19,7 @@ Options:
 
 Other arguments are passed to the repository's ./build script and its
 configure step. The helper checks required Cygwin packages, configures
-the cross-compiler environment, and builds bundled static libpng.
+the cross-compiler environment, patches bundled SDL when needed, and builds static libpng.
 
 Examples:
   ./build-cygwin
@@ -50,7 +50,7 @@ check_cygwin_dependencies() {
         "mingw64-${arch}-runtime"
         "mingw64-${arch}-win-iconv"
         "mingw64-${arch}-zlib"
-        nasm pkg-config
+        nasm pkg-config patch
     )
 
     if ! command -v cygcheck >/dev/null 2>&1; then
@@ -74,6 +74,130 @@ check_cygwin_dependencies() {
     fi
 
     echo "All required Cygwin packages are installed"
+}
+
+# Apply the compatibility patch to SDL's Autoconf source and generated configure.
+# Check both files together to avoid leaving SDL partially patched.
+apply_sdl_compat_patch() {
+    local sdl_dir=vs/sdl
+    local file
+    local -a needs_patch=()
+    local -a already_patched=()
+
+    for file in configure.ac configure; do
+        if [ ! -f "$sdl_dir/$file" ]; then
+            echo "Missing SDL configuration file: $sdl_dir/$file" >&2
+            return 1
+        fi
+        if sdl_patch "$file" | patch --batch --forward --dry-run --fuzz=0 -p1 -d "$sdl_dir" >/dev/null 2>&1; then
+            needs_patch+=("$file")
+        elif sdl_patch "$file" | patch --batch --dry-run --fuzz=0 -R -p1 -d "$sdl_dir" >/dev/null 2>&1; then
+            already_patched+=("$file")
+        else
+            echo "SDL $file differs from both the expected original and patched versions." >&2
+            echo "No SDL files were modified. Inspect $sdl_dir/$file before continuing." >&2
+            return 1
+        fi
+    done
+
+    if ((${#needs_patch[@]})); then
+        echo "Applying SDL -mno-cygwin compatibility patch: ${needs_patch[*]}"
+        for file in "${needs_patch[@]}"; do
+            sdl_patch "$file" | patch --batch --forward --fuzz=0 -p1 -d "$sdl_dir" || return 1
+        done
+    else
+        echo "SDL -mno-cygwin compatibility patch already applied"
+    fi
+}
+
+# Embedded patches taken from the supplied original and Cygwin-adjusted SDL files.
+sdl_patch() {
+    case "$1" in
+        configure.ac)
+            cat <<'SDL_CONFIGURE_AC_PATCH'
+--- a/configure.ac
++++ b/configure.ac
+@@ -73,9 +73,22 @@
+ fi
+ case "$host" in
+     *-*-cygwin*)
+-        # We build SDL on cygwin without the UNIX emulation layer
+-        BASE_CFLAGS="-I/usr/include/mingw -mno-cygwin"
+-        BASE_LDFLAGS="-mno-cygwin"
++        # Legacy Cygwin GCC may support native Windows builds via -mno-cygwin.
++        # Modern MinGW-w64 GCC does not need or accept this option.
++        save_CFLAGS="$CFLAGS"
++        have_no_cygwin=no
++        AC_MSG_CHECKING(for GCC -mno-cygwin option)
++        CFLAGS="$save_CFLAGS -mno-cygwin"
++        AC_COMPILE_IFELSE([AC_LANG_PROGRAM([],[])], [have_no_cygwin=yes], [])
++        AC_MSG_RESULT($have_no_cygwin)
++        CFLAGS="$save_CFLAGS"
++
++        BASE_CFLAGS=""
++        BASE_LDFLAGS=""
++        if test x$have_no_cygwin = xyes; then
++            BASE_CFLAGS="-I/usr/include/mingw -mno-cygwin"
++            BASE_LDFLAGS="-mno-cygwin"
++        fi
+         ;;
+     *)
+         BASE_CFLAGS="-D_GNU_SOURCE=1"
+SDL_CONFIGURE_AC_PATCH
+            ;;
+        configure)
+            cat <<'SDL_CONFIGURE_PATCH'
+--- a/configure
++++ b/configure
+@@ -15821,9 +15821,41 @@
+ fi
+ case "$host" in
+     *-*-cygwin*)
+-        # We build SDL on cygwin without the UNIX emulation layer
+-        BASE_CFLAGS="-I/usr/include/mingw -mno-cygwin"
+-        BASE_LDFLAGS="-mno-cygwin"
++        # Legacy Cygwin GCC may support native Windows builds via -mno-cygwin.
++        # Modern MinGW-w64 GCC does not need or accept this option.
++        save_CFLAGS="$CFLAGS"
++        have_no_cygwin=no
++        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for GCC -mno-cygwin option" >&5
++printf %s "checking for GCC -mno-cygwin option... " >&6; }
++        CFLAGS="$save_CFLAGS -mno-cygwin"
++
++        cat confdefs.h - <<_ACEOF >conftest.$ac_ext
++/* end confdefs.h.  */
++
++int
++main (void)
++{
++
++  ;
++  return 0;
++}
++_ACEOF
++if { (eval echo "$as_me:$LINENO: \"$ac_compile\"") >&5
++     (eval "$ac_compile") 2>&5
++     ac_status=$?
++     echo "$as_me:$LINENO: \$? = $ac_status" >&5
++     test $ac_status -eq 0; } && test -s conftest.$ac_objext; then
++  have_no_cygwin=yes
++fi
++rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext
++        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $have_no_cygwin" >&5
++printf "%s\n" "$have_no_cygwin" >&6; }
++        CFLAGS="$save_CFLAGS"
++
++        if test x$have_no_cygwin = xyes; then
++            BASE_CFLAGS="-I/usr/include/mingw -mno-cygwin"
++            BASE_LDFLAGS="-mno-cygwin"
++        fi
+         ;;
+     *)
+         BASE_CFLAGS="-D_GNU_SOURCE=1"
+SDL_CONFIGURE_PATCH
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 case "$(uname -s)" in
@@ -115,6 +239,8 @@ export LDFLAGS="-L$png_prefix/lib -L$mingw_prefix/lib ${LDFLAGS:-}"
 
 # Retain the original helper's Windows device-property linkage workaround.
 export LIBS="${LIBS:-} -luuid"
+
+apply_sdl_compat_patch || exit 1
 
 echo "Compiling our internal libpng"
 (cd vs/libpng && ./build-dosbox.sh) || exit 1
