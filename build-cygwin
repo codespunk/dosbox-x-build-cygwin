@@ -1,38 +1,78 @@
 #!/usr/bin/env bash
 
 # Build native Windows binaries using MinGW-w64 from Cygwin.
-# Usage: ./build-cygwin [32] [configure options...]
+# Usage: ./build-cygwin [32] [-i|--incremental] [--with-sdl] [--with-libpng] [--only-COMPONENT] [configure options...]
 #        ./build-cygwin --help
 set -e
 
 show_help() {
     cat <<'EOF'
-Usage: ./build-cygwin [32] [configure options...]
+Usage: ./build-cygwin [32] [options] [configure options...]
        ./build-cygwin --help
 
-Build DOSBox-X as a native Windows executable from Cygwin using MinGW-w64.
+Build DOSBox-X for 32-bit or 64-bit Windows from Cygwin using MinGW-w64.
 
 Options:
-  32             Build a 32-bit Windows executable (i686-w64-mingw32).
-                 Default: 64-bit Windows (x86_64-w64-mingw32).
-  -h, --help     Show this help message and exit.
+  32                 Target 32-bit Windows (i686-w64-mingw32).
+                     Default: 64-bit Windows (x86_64-w64-mingw32).
+  -h, --help         Display this help message and exit.
 
-Other arguments are passed to the repository's ./build script and its
-configure step. The helper checks required Cygwin packages, configures
-the cross-compiler environment, patches bundled SDL when needed, and builds static libpng.
+Incremental Builds:
+  -i, --incremental  Rebuild changed files without rebuilding bundled libraries.
+  --with-sdl         Also rebuild SDL and SDL_net.
+  --with-libpng      Also rebuild bundled libpng.
+
+Component Builds:
+  --only-NAME        Compile only src/NAME without linking the executable.
+  --only-sdl         Rebuild bundled SDL and SDL_net only.
+  --only-sdlnet      Rebuild bundled SDL_net only.
+  --only-libpng      Rebuild bundled static libpng only.
+
+Additional Information:
+  Full builds check dependencies, configure the toolchain, patch SDL when
+  necessary, and build bundled libraries before compiling DOSBox-X.
+
+  Incremental builds skip dependency checks and bundled libraries unless
+  explicitly requested. Component builds are incremental and do not link
+  the final executable.
+
+  Additional configure options are forwarded to the repository's ./build.
 
 Examples:
-  ./build-cygwin
-  ./build-cygwin 32
+  ./build-cygwin                     Full 64-bit build
+  ./build-cygwin 32                  Full 32-bit build
+  ./build-cygwin -i                  Incremental 64-bit build
+  ./build-cygwin 32 -i               Incremental 32-bit build
+  ./build-cygwin -i --with-sdl       Incremental build, rebuild SDL/SDL_net
+  ./build-cygwin -i --with-libpng    Incremental build, rebuild libpng
+  ./build-cygwin --only-cpu          Compile CPU component only
+  ./build-cygwin --only-dos          Compile DOS component only
+  ./build-cygwin --only-sdl          Rebuild SDL and SDL_net only
+  ./build-cygwin --only-libpng       Rebuild libpng only
 EOF
 }
 
 build32=no
+incremental=no
+with_sdl=no
+with_libpng=no
+only_component=""
 configure_args=()
 for arg in "$@"; do
     case "$arg" in
         -h|--help) show_help; exit 0 ;;
         32) build32=yes ;;
+        -i|--incremental) incremental=yes ;;
+        --only-*)
+            if [ -n "$only_component" ]; then
+                echo "Specify only one --only-COMPONENT option." >&2
+                exit 1
+            fi
+            only_component="${arg#--only-}"
+            incremental=yes
+            ;;
+        --with-sdl) with_sdl=yes ;;
+        --with-libpng|--width-libpng) with_libpng=yes ;;
         *) configure_args+=("$arg") ;;
     esac
 done
@@ -213,8 +253,10 @@ fi
 triplet="${arch}-w64-mingw32"
 mingw_prefix="/usr/$triplet/sys-root/mingw"
 
-echo "Checking for preflight dependencies..."
-check_cygwin_dependencies "$arch" || exit 1
+if [ "$incremental" != yes ]; then
+    echo "Checking for preflight dependencies..."
+    check_cygwin_dependencies "$arch" || exit 1
+fi
 
 if ! command -v "$triplet-gcc" >/dev/null 2>&1 ||
    ! command -v "$triplet-g++" >/dev/null 2>&1; then
@@ -239,6 +281,91 @@ export LDFLAGS="-L$png_prefix/lib -L$mingw_prefix/lib ${LDFLAGS:-}"
 
 # Retain the original helper's Windows device-property linkage workaround.
 export LIBS="${LIBS:-} -luuid"
+
+if [ "$incremental" = yes ]; then
+    if [ -n "$only_component" ] && { [ "$with_sdl" = yes ] || [ "$with_libpng" = yes ]; }; then
+        echo "--only-COMPONENT cannot be combined with --with-sdl or --with-libpng." >&2
+        exit 1
+    fi
+    if ((${#configure_args[@]})); then
+        echo "Configure options cannot be used with --incremental; run a full build instead." >&2
+        exit 1
+    fi
+
+    if [ ! -f Makefile ] || [ ! -f config.status ]; then
+        echo "No configured DOSBox-X build found. Run a full ./build-cygwin build first." >&2
+        exit 1
+    fi
+
+    # Avoid mixing 32-bit and 64-bit objects in the same build directory.
+    configured_host="$(sed -n 's/^host = //p' Makefile | head -n 1)"
+    configured_cc="$(sed -n 's/^CC = //p' Makefile | head -n 1)"
+    configured_cxx="$(sed -n 's/^CXX = //p' Makefile | head -n 1)"
+    if [ "$configured_host" != "$triplet" ] ||
+       [[ "$configured_cc" != "$triplet-gcc"* ]] ||
+       [[ "$configured_cxx" != "$triplet-g++"* ]]; then
+        echo "Existing build is not configured for $triplet." >&2
+        echo "Configured host: ${configured_host:-unknown}" >&2
+        echo "Configured CC: ${configured_cc:-unknown}" >&2
+        echo "Configured CXX: ${configured_cxx:-unknown}" >&2
+        echo "Run a full build for the requested architecture first." >&2
+        exit 1
+    fi
+
+    # A component-only build intentionally does not link the final executable.
+    # Discover top-level components from the configured source tree.
+    if [ -n "$only_component" ]; then
+        case "$only_component" in
+            sdl)
+                apply_sdl_compat_patch || exit 1
+                echo "Rebuilding bundled SDL 1.x"
+                (cd vs/sdl && ./build-dosbox.sh) || exit 1
+                echo "Rebuilding bundled SDL_net 1.x"
+                (cd vs/sdlnet && ./build-dosbox.sh) || exit 1
+                ;;
+            sdlnet)
+                echo "Rebuilding bundled SDL_net 1.x"
+                (cd vs/sdlnet && ./build-dosbox.sh) || exit 1
+                ;;
+            libpng)
+                echo "Rebuilding bundled static libpng"
+                (cd vs/libpng && ./build-dosbox.sh) || exit 1
+                ;;
+            include)
+                echo "Building include component"
+                make --no-print-directory -C include -j"$(nproc)" || exit 1
+                ;;
+            *)
+                # Restrict component names to a single existing src subdirectory.
+                if [[ ! "$only_component" =~ ^[a-zA-Z0-9_+-]+$ ]] ||
+                   [ ! -f "src/$only_component/Makefile" ]; then
+                    echo "Unknown component: $only_component" >&2
+                    echo "Expected a configured src/<component>/Makefile." >&2
+                    exit 1
+                fi
+                echo "Incrementally building src/$only_component for $triplet (no final link)"
+                make --no-print-directory -C "src/$only_component" -j"$(nproc)" || exit 1
+                ;;
+        esac
+        exit 0
+    fi
+
+    # Rebuild bundled libraries only when explicitly requested.
+    if [ "$with_sdl" = yes ]; then
+        apply_sdl_compat_patch || exit 1
+        echo "Rebuilding bundled SDL 1.x"
+        (cd vs/sdl && ./build-dosbox.sh) || exit 1
+        echo "Rebuilding bundled SDL_net 1.x"
+        (cd vs/sdlnet && ./build-dosbox.sh) || exit 1
+    fi
+    if [ "$with_libpng" = yes ]; then
+        echo "Rebuilding bundled static libpng"
+        (cd vs/libpng && ./build-dosbox.sh) || exit 1
+    fi
+
+    echo "Incrementally building DOSBox-X for $triplet"
+    exec make --no-print-directory -j"$(nproc)"
+fi
 
 apply_sdl_compat_patch || exit 1
 
