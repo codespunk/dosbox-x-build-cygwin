@@ -13,65 +13,61 @@ Usage: ./build-cygwin [32] [options] [configure options...]
 Build DOSBox-X for 32-bit or 64-bit Windows from Cygwin using MinGW-w64.
 
 Options:
-  32                 Target 32-bit Windows (i686-w64-mingw32).
-                     Default: 64-bit Windows (x86_64-w64-mingw32).
-  --strip            Strip debug information from src/dosbox-x.exe.
-                     Alone: strip an existing executable without building.
-  -h, --help         Display this help message and exit.
+  32                 Target 32-bit Windows (i686-w64-mingw32)
+                     Default: 64-bit Windows (x86_64-w64-mingw32)
+  --strip            Strip debug information from src/dosbox-x.exe
+                     Runs after a successful build
+  -h, --help         Display this help message and exit
 
-Incremental Builds:
-  -i, --incremental  Rebuild changed files without rebuilding bundled libraries.
-  --with-sdl         Also rebuild SDL and SDL_net.
-  --with-libpng      Also rebuild bundled libpng.
+Incremental Builds (default):
+  Missing bundled SDL, SDL_net, and libpng libraries are built automatically
+  --with-sdl         Also rebuild SDL and SDL_net
+  --with-libpng      Also rebuild bundled libpng
 
 Component Builds:
-  --only-NAME        Compile only src/NAME without linking the executable.
-  --only-sdl         Rebuild bundled SDL and SDL_net only.
-  --only-sdlnet      Rebuild bundled SDL_net only.
-  --only-libpng      Rebuild bundled static libpng only.
+  --only-NAME        Compile only src/NAME without linking the executable
+  --only-sdl         Rebuild bundled SDL and SDL_net only
+  --only-sdlnet      Rebuild bundled SDL_net only
+  --only-libpng      Rebuild bundled static libpng only
 
 Additional configure options are forwarded to the repository's ./build.
-Full builds check dependencies and configure the toolchain. Incremental
-builds use the existing configuration and skip package preflight checks.
+An existing configuration is built incrementally by default. If no
+configuration exists, the helper runs the full setup and build. Passing
+configure options also runs the full setup. Incremental builds skip
+package preflight checks.
 
 Examples:
-  ./build-cygwin                     Full 64-bit build
-  ./build-cygwin 32                  Full 32-bit build
-  ./build-cygwin -i                  Incremental 64-bit build
+  ./build-cygwin                     Incremental 64-bit build
+  ./build-cygwin 32                  Incremental 32-bit build
   ./build-cygwin --only-cpu          Compile CPU component only
   ./build-cygwin --only-sdl          Rebuild SDL and SDL_net only
-  ./build-cygwin --strip             Strip existing executable
-  ./build-cygwin -i --strip          Incremental build, then strip
-  ./build-cygwin 32 --strip -i       32-bit incremental build, then strip
+  ./build-cygwin --strip             Incremental build, then strip
+  ./build-cygwin --strip --with-sdl  Rebuild SDL, build, then strip
+  ./build-cygwin 32 --with-libpng    Rebuild libpng and 32-bit target
 EOF
 }
 
 build32=no
-incremental=no
 with_sdl=no
 with_libpng=no
 only_component=""
 strip_executable=no
-build_requested=no
 configure_args=()
 for arg in "$@"; do
     case "$arg" in
         -h|--help) show_help; exit 0 ;;
         32) build32=yes ;;
         --strip) strip_executable=yes ;;
-        -i|--incremental) incremental=yes; build_requested=yes ;;
         --only-*)
             if [ -n "$only_component" ]; then
                 echo "Specify only one --only-COMPONENT option." >&2
                 exit 1
             fi
             only_component="${arg#--only-}"
-            incremental=yes
-            build_requested=yes
             ;;
-        --with-sdl) with_sdl=yes; build_requested=yes ;;
-        --with-libpng|--width-libpng) with_libpng=yes; build_requested=yes ;;
-        *) configure_args+=("$arg"); build_requested=yes ;;
+        --with-sdl) with_sdl=yes ;;
+        --with-libpng|--width-libpng) with_libpng=yes ;;
+        *) configure_args+=("$arg") ;;
     esac
 done
 
@@ -266,22 +262,12 @@ strip_dosbox_executable() {
     "$strip_tool" --strip-debug "$executable"
 }
 
-# --strip alone operates on an existing executable, without configuring
-# or building. Do not strip after a component-only compile operation.
-if [ "$strip_executable" = yes ] && [ "$build_requested" = no ]; then
-    strip_dosbox_executable
-    exit $?
-fi
+# Stripping is a post-build operation, never a standalone shortcut.
 if [ "$strip_executable" = yes ] && [ -n "$only_component" ]; then
     echo "--strip cannot be combined with --only-COMPONENT." >&2
     exit 1
 fi
 mingw_prefix="/usr/$triplet/sys-root/mingw"
-
-if [ "$incremental" != yes ]; then
-    echo "Checking for preflight dependencies..."
-    check_cygwin_dependencies "$arch" || exit 1
-fi
 
 if ! command -v "$triplet-gcc" >/dev/null 2>&1 ||
    ! command -v "$triplet-g++" >/dev/null 2>&1; then
@@ -307,18 +293,31 @@ export LDFLAGS="-L$png_prefix/lib -L$mingw_prefix/lib ${LDFLAGS:-}"
 # Retain the original helper's Windows device-property linkage workaround.
 export LIBS="${LIBS:-} -luuid"
 
+# Reuse an existing configuration by default. A new or cleaned tree,
+# or explicitly supplied configure arguments, requires full setup.
+if [ -f Makefile ] && [ -f config.status ] && ((${#configure_args[@]} == 0)); then
+    incremental=yes
+else
+    incremental=no
+fi
+
+if [ "$incremental" = no ]; then
+    if [ -n "$only_component" ]; then
+        echo "Component builds require a configured build. Run ./build-cygwin first." >&2
+        exit 1
+    fi
+    echo "Checking for preflight dependencies..."
+    check_cygwin_dependencies "$arch" || exit 1
+fi
+
 if [ "$incremental" = yes ]; then
     if [ -n "$only_component" ] && { [ "$with_sdl" = yes ] || [ "$with_libpng" = yes ]; }; then
         echo "--only-COMPONENT cannot be combined with --with-sdl or --with-libpng." >&2
         exit 1
     fi
-    if ((${#configure_args[@]})); then
-        echo "Configure options cannot be used with --incremental; run a full build instead." >&2
-        exit 1
-    fi
 
     if [ ! -f Makefile ] || [ ! -f config.status ]; then
-        echo "No configured DOSBox-X build found. Run a full ./build-cygwin build first." >&2
+        echo "No configured DOSBox-X build found." >&2
         exit 1
     fi
 
@@ -333,7 +332,7 @@ if [ "$incremental" = yes ]; then
         echo "Configured host: ${configured_host:-unknown}" >&2
         echo "Configured CC: ${configured_cc:-unknown}" >&2
         echo "Configured CXX: ${configured_cxx:-unknown}" >&2
-        echo "Run a full build for the requested architecture first." >&2
+        echo "Clean the build tree and rebuild for the requested architecture." >&2
         exit 1
     fi
 
@@ -375,22 +374,55 @@ if [ "$incremental" = yes ]; then
         exit 0
     fi
 
-    # Rebuild bundled libraries only when explicitly requested.
-    if [ "$with_sdl" = yes ]; then
-        apply_sdl_compat_patch || exit 1
-        echo "Rebuilding bundled SDL 1.x"
-        (cd vs/sdl && ./build-dosbox.sh) || exit 1
-        echo "Rebuilding bundled SDL_net 1.x"
-        (cd vs/sdlnet && ./build-dosbox.sh) || exit 1
+    # Reuse bundled libraries when present. A configured Makefile alone does
+    # not guarantee that their static archives have been built.
+    sdl_lib_dir="$(pwd)/vs/sdl/linux-host/lib"
+    sdlnet_lib_dir="$(pwd)/vs/sdlnet/linux-host/lib"
+    need_sdl=no
+    need_sdlnet=no
+
+    if [ "$with_sdl" = yes ] ||
+       [ ! -f "$sdl_lib_dir/libSDL.a" ] ||
+       [ ! -f "$sdl_lib_dir/libSDLmain.a" ]; then
+        need_sdl=yes
+        need_sdlnet=yes
+    elif [ ! -f "$sdlnet_lib_dir/libSDL_net.a" ]; then
+        need_sdlnet=yes
     fi
-    if [ "$with_libpng" = yes ]; then
-        echo "Rebuilding bundled static libpng"
+
+    if [ "$need_sdl" = yes ]; then
+        apply_sdl_compat_patch || exit 1
+        echo "Building bundled SDL (requested or missing archive)"
+        (cd vs/sdl && ./build-dosbox.sh) || exit 1
+        for archive in libSDL.a libSDLmain.a; do
+            if [ ! -f "$sdl_lib_dir/$archive" ]; then
+                echo "SDL build did not produce $sdl_lib_dir/$archive" >&2
+                exit 1
+            fi
+        done
+    fi
+
+    if [ "$need_sdlnet" = yes ]; then
+        echo "Building bundled SDL_net (requested or missing archive)"
+        (cd vs/sdlnet && ./build-dosbox.sh) || exit 1
+        if [ ! -f "$sdlnet_lib_dir/libSDL_net.a" ]; then
+            echo "SDL_net build did not produce $sdlnet_lib_dir/libSDL_net.a" >&2
+            exit 1
+        fi
+    fi
+
+    if [ "$with_libpng" = yes ] || [ ! -f "$png_prefix/lib/libpng.a" ]; then
+        echo "Building bundled static libpng (requested or missing archive)"
         (cd vs/libpng && ./build-dosbox.sh) || exit 1
+        if [ ! -f "$png_prefix/lib/libpng.a" ]; then
+            echo "libpng build did not produce $png_prefix/lib/libpng.a" >&2
+            exit 1
+        fi
     fi
 
     echo "Incrementally building DOSBox-X for $triplet"
     if [ "$strip_executable" = yes ]; then
-        make --no-print-directory -j"$(nproc)"
+        make --no-print-directory -j"$(nproc)" || exit $?
         strip_dosbox_executable
     else
         exec make --no-print-directory -j"$(nproc)"
@@ -402,9 +434,13 @@ apply_sdl_compat_patch || exit 1
 
 echo "Compiling our internal libpng"
 (cd vs/libpng && ./build-dosbox.sh) || exit 1
+if [ ! -f "$png_prefix/lib/libpng.a" ]; then
+    echo "libpng build did not produce $png_prefix/lib/libpng.a" >&2
+    exit 1
+fi
 
 # Do not forward '32': the original ./build treats it as a Linux -m32 build.
-./build "--host=$triplet" "${configure_args[@]}"
+./build "--host=$triplet" "${configure_args[@]}" || exit $?
 if [ "$strip_executable" = yes ]; then
     strip_dosbox_executable
 fi
