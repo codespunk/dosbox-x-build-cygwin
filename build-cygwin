@@ -2,12 +2,14 @@
 
 # Build native Windows binaries using MinGW-w64 from Cygwin.
 # Usage: ./build-cygwin [32] [options] [configure options...]
+#        ./build-cygwin {clean|distclean|mostlyclean}
 #        ./build-cygwin --help
 set -e
 
 show_help() {
     cat <<'EOF'
 Usage: ./build-cygwin [32] [options] [configure options...]
+       ./build-cygwin {clean|distclean|mostlyclean}
        ./build-cygwin --help
 
 Build DOSBox-X for 32-bit or 64-bit Windows from Cygwin using MinGW-w64.
@@ -15,6 +17,9 @@ Build DOSBox-X for 32-bit or 64-bit Windows from Cygwin using MinGW-w64.
 Options:
   32                 Target 32-bit Windows (i686-w64-mingw32)
                      Default: 64-bit Windows (x86_64-w64-mingw32)
+  clean              Remove compiled files while preserving configuration
+  distclean          Remove compiled files and generated configuration
+  mostlyclean        Remove most compilation outputs
   --strip            Strip debug information from src/dosbox-x.exe
                      Runs after a successful build
   -h, --help         Display this help message and exit
@@ -37,6 +42,9 @@ configure options also runs the full setup. Incremental builds skip
 package preflight checks.
 
 Examples:
+  ./build-cygwin clean               Remove compiled files
+  ./build-cygwin distclean           Remove build files and configuration
+  ./build-cygwin mostlyclean         Remove most compilation outputs
   ./build-cygwin                     Incremental 64-bit build
   ./build-cygwin 32                  Incremental 32-bit build
   ./build-cygwin --only-cpu          Compile CPU component only
@@ -52,11 +60,19 @@ with_sdl=no
 with_libpng=no
 only_component=""
 strip_executable=no
+clean_target=""
 configure_args=()
 for arg in "$@"; do
     case "$arg" in
         -h|--help) show_help; exit 0 ;;
         32) build32=yes ;;
+        clean|distclean|mostlyclean)
+            if [ -n "$clean_target" ]; then
+                echo "Specify only one cleanup target." >&2
+                exit 1
+            fi
+            clean_target="$arg"
+            ;;
         --strip) strip_executable=yes ;;
         --only-*)
             if [ -n "$only_component" ]; then
@@ -238,6 +254,29 @@ case "$(uname -s)" in
     CYGWIN*) echo "Cygwin environment detected" ;;
     *) echo "This helper requires Cygwin" >&2; exit 1 ;;
 esac
+
+# Cleaning does not need the MinGW toolchain or an existing executable.
+# Handle it before compiler, sysroot, and build configuration checks.
+if [ -n "$clean_target" ]; then
+    if [ "$#" -ne 1 ]; then
+        echo "Cleanup commands cannot be combined with other arguments." >&2
+        exit 1
+    fi
+    if [ ! -f Makefile ]; then
+        echo "Cannot run $clean_target: no Makefile found in the project root." >&2
+        exit 1
+    fi
+    # Avoid Automake re-running configure during cleanup when generated inputs
+    # are newer than the existing configuration. Cleanup does not need a refresh.
+    # Only touch files that already exist; never create missing Makefiles.
+    for generated in config.status Makefile src/Makefile; do
+        if [ -f "$generated" ]; then
+            touch "$generated" || exit 1
+        fi
+    done
+    echo "Cleaning DOSBox-X build tree (make $clean_target)"
+    exec make --no-print-directory "$clean_target"
+fi
 
 if [ "$build32" = yes ]; then
     arch=i686

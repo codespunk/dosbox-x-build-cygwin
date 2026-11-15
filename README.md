@@ -13,6 +13,7 @@ Build native 32-bit and 64-bit Windows versions of DOSBox-X from Cygwin using Mi
 - Reuses bundled SDL, SDL_net, and static libpng libraries when available, and builds missing archives automatically.
 - Supports rebuilding bundled libraries explicitly and compiling individual DOSBox-X components without linking.
 - Can strip debugging information from `src/dosbox-x.exe` using MinGW-w64.
+- Supports `clean`, `distclean`, and `mostlyclean` cleanup targets.
 
 ## Installation
 
@@ -26,6 +27,7 @@ chmod +x build-cygwin
 
 ```text
 Usage: ./build-cygwin [32] [options] [configure options...]
+       ./build-cygwin {clean|distclean|mostlyclean}
        ./build-cygwin --help
 ```
 
@@ -45,6 +47,29 @@ If the configuration files are missing, the helper performs full setup, checks d
 ```
 
 Use actual options supported by the DOSBox-X configure script. To switch between 32-bit and 64-bit targets, clean the existing build tree first: the helper rejects a configured build for the wrong architecture rather than mixing object files.
+
+### Cleaning the build tree
+
+The helper exposes three standard Automake cleanup targets:
+
+```sh
+./build-cygwin clean        # Remove compiled files; retain configuration
+./build-cygwin distclean    # Also remove generated configuration files
+./build-cygwin mostlyclean  # Remove most compilation outputs
+```
+
+`clean` is useful when you want to recompile the project while keeping the
+existing `Makefile` and `config.status`. `distclean` is more thorough: the next
+normal build will detect the missing configuration and run full setup.
+`mostlyclean` performs a less extensive cleanup than `clean`.
+
+Each command requires an existing top-level `Makefile`, must be used alone,
+and runs without checking the MinGW-w64 compiler or rebuilding libraries.
+Before cleanup, the helper refreshes timestamps on existing generated
+configuration files to prevent Automake from unnecessarily rerunning configure.
+Cleanup affects files managed by the project's Makefiles; separately built
+SDL, SDL_net, and libpng archives may remain. Their presence is checked
+again on the next normal build.
 
 ### Bundled libraries
 
@@ -109,6 +134,9 @@ The helper uses the target architecture's MinGW-w64 `strip` utility with `--stri
 ```text
   32                 Target 32-bit Windows (i686-w64-mingw32)
                      Default: 64-bit Windows (x86_64-w64-mingw32)
+  clean              Remove compiled files while retaining configuration
+  distclean          Remove compiled files and generated configuration
+  mostlyclean        Remove most compilation outputs
   --strip            Strip debug information from src/dosbox-x.exe
                      Runs after the build
   --with-sdl         Rebuild bundled SDL and SDL_net
@@ -120,7 +148,7 @@ The helper uses the target architecture's MinGW-w64 `strip` utility with `--stri
   -h, --help         Show usage information and exit
 ```
 
-`--only-*` options cannot be combined with one another, `--with-*`, or `--strip`. Additional configure options are forwarded to the repository's `./build` script and cause full setup.
+Cleanup commands cannot be combined with any other arguments. `--only-*` options cannot be combined with one another, `--with-*`, or `--strip`. Additional configure options are forwarded to the repository's `./build` script and cause full setup.
 
 ## Requirements
 
