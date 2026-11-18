@@ -26,14 +26,17 @@ Options:
 
 Incremental Builds (default):
   Missing bundled SDL, SDL_net, and libpng libraries are built automatically
-  --with-sdl         Also rebuild SDL and SDL_net
+  --with-sdl         Also rebuild SDL 1.x and SDL_net 1.x
+  --with-sdl2        Also rebuild SDL2 and SDL2_net (exclusive with --with-sdl)
   --with-libpng      Also rebuild bundled libpng
 
 Component Builds:
   --only-NAME        Compile only src/NAME without linking the executable
-  --only-sdl         Rebuild bundled SDL and SDL_net only
-  --only-sdlnet      Rebuild bundled SDL_net only
-  --only-libpng      Rebuild bundled static libpng only
+  --only-sdl         Incrementally build bundled SDL and SDL_net only
+  --only-sdlnet      Incrementally build bundled SDL_net only
+  --only-sdl2        Incrementally build bundled SDL2 and SDL2_net only
+  --only-sdl2net     Incrementally build bundled SDL2_net only
+  --only-libpng      Incrementally build bundled static libpng only
 
 Additional configure options are forwarded to the repository's ./build.
 An existing configuration is built incrementally by default. If no
@@ -48,7 +51,8 @@ Examples:
   ./build-cygwin                     Incremental 64-bit build
   ./build-cygwin 32                  Incremental 32-bit build
   ./build-cygwin --only-cpu          Compile CPU component only
-  ./build-cygwin --only-sdl          Rebuild SDL and SDL_net only
+  ./build-cygwin --only-sdl          Incrementally build SDL and SDL_net
+  ./build-cygwin --only-sdl2         Incrementally build SDL2 and SDL2_net
   ./build-cygwin --strip             Incremental build, then strip
   ./build-cygwin --strip --with-sdl  Rebuild SDL, build, then strip
   ./build-cygwin 32 --with-libpng    Rebuild libpng and 32-bit target
@@ -57,6 +61,7 @@ EOF
 
 build32=no
 with_sdl=no
+with_sdl2=no
 with_libpng=no
 only_component=""
 strip_executable=no
@@ -82,10 +87,16 @@ for arg in "$@"; do
             only_component="${arg#--only-}"
             ;;
         --with-sdl) with_sdl=yes ;;
+        --with-sdl2) with_sdl2=yes ;;
         --with-libpng|--width-libpng) with_libpng=yes ;;
         *) configure_args+=("$arg") ;;
     esac
 done
+
+if [ "$with_sdl" = yes ] && [ "$with_sdl2" = yes ]; then
+    echo "--with-sdl and --with-sdl2 are mutually exclusive." >&2
+    exit 1
+fi
 
 check_cygwin_dependencies() {
     local arch=$1 package
@@ -332,6 +343,131 @@ export LDFLAGS="-L$png_prefix/lib -L$mingw_prefix/lib ${LDFLAGS:-}"
 # Retain the original helper's Windows device-property linkage workaround.
 export LIBS="${LIBS:-} -luuid"
 
+# Build archives are compared by modification time, not byte content: libtool's
+# install/ranlib can change ar metadata without changing any object files.
+# Check only public headers installed by the component's Makefile.
+bundled_install_needed() {
+    local component="$1" archive built installed header source_header
+    shift
+    local root="vs/$component"
+    local build="$root/linux-build"
+    local prefix="$root/linux-host"
+    local -a sdl_headers=(
+        SDL.h SDL_active.h SDL_audio.h SDL_byteorder.h SDL_cdrom.h
+        SDL_cpuinfo.h SDL_endian.h SDL_error.h SDL_events.h SDL_getenv.h
+        SDL_joystick.h SDL_keyboard.h SDL_keysym.h SDL_loadso.h
+        SDL_main.h SDL_mouse.h SDL_mutex.h SDL_name.h SDL_opengl.h
+        SDL_platform.h SDL_quit.h SDL_rwops.h SDL_stdinc.h SDL_syswm.h
+        SDL_thread.h SDL_timer.h SDL_types.h SDL_version.h SDL_video.h
+        begin_code.h close_code.h
+    )
+
+    for archive in "$@"; do
+        if [ -f "$build/build/.libs/$archive" ]; then
+            built="$build/build/.libs/$archive"
+        elif [ -f "$build/.libs/$archive" ]; then
+            built="$build/.libs/$archive"
+        else
+            echo "Cannot locate built archive $archive for $component" >&2
+            return 0
+        fi
+        installed="$prefix/lib/$archive"
+        if [ ! -f "$installed" ] || [ "$built" -nt "$installed" ]; then
+            return 0
+        fi
+    done
+
+    case "$component" in
+        sdl)
+            for header in "${sdl_headers[@]}"; do
+                source_header="$root/include/$header"
+                installed="$prefix/include/SDL/$header"
+                if [ ! -f "$installed" ] || ! cmp -s "$source_header" "$installed"; then
+                    return 0
+                fi
+            done
+            # The installed SDL_config.h is generated, not the source default.
+            source_header="$build/include/SDL_config.h"
+            installed="$prefix/include/SDL/SDL_config.h"
+            if [ ! -f "$installed" ] || ! cmp -s "$source_header" "$installed"; then
+                return 0
+            fi
+            ;;
+        sdl2)
+            # SDL2 installs generated headers; the library timestamp is the
+            # primary change detector. Check the installed public headers too.
+            for source_header in "$root"/include/*.h; do
+                [ -f "$source_header" ] || continue
+                header="${source_header##*/}"
+                installed="$prefix/include/SDL2/$header"
+                [ -f "$installed" ] || continue
+                if ! cmp -s "$source_header" "$installed"; then
+                    return 0
+                fi
+            done
+            ;;
+        sdl2net)
+            source_header="$root/SDL_net.h"
+            installed="$prefix/include/SDL2/SDL_net.h"
+            if [ -f "$source_header" ] &&
+               { [ ! -f "$installed" ] || ! cmp -s "$source_header" "$installed"; }; then
+                return 0
+            fi
+            ;;
+        sdlnet)
+            source_header="$root/SDL_net.h"
+            installed="$prefix/include/SDL/SDL_net.h"
+            if [ ! -f "$installed" ] || ! cmp -s "$source_header" "$installed"; then
+                return 0
+            fi
+            ;;
+        libpng)
+            for header in png.h pngconf.h pnglibconf.h; do
+                source_header="$root/$header"
+                [ -f "$build/$header" ] && source_header="$build/$header"
+                [ -f "$source_header" ] || continue
+                installed="$prefix/include/$header"
+                if [ ! -f "$installed" ] || ! cmp -s "$source_header" "$installed"; then
+                    return 0
+                fi
+            done
+            ;;
+    esac
+    return 1
+}
+
+build_bundled_component() {
+    local component="$1" description="$2" archive
+    shift 2
+    if [ -f "vs/$component/linux-build/Makefile" ]; then
+        echo "Incrementally building $description"
+        (
+            cd "vs/$component/linux-build" || exit 1
+            make --no-print-directory -j"$(nproc)"
+        ) || return $?
+
+        if bundled_install_needed "$component" "$@"; then
+            echo "Installing updated $description"
+            (
+                cd "vs/$component/linux-build" || exit 1
+                make --no-print-directory install
+            ) || return $?
+        else
+            echo "$description is already installed and up to date"
+        fi
+    else
+        echo "Configuring and building $description"
+        (cd "vs/$component" && ./build-dosbox.sh) || return $?
+    fi
+
+    for archive in "$@"; do
+        if [ ! -f "vs/$component/linux-host/lib/$archive" ]; then
+            echo "$description build did not produce vs/$component/linux-host/lib/$archive" >&2
+            return 1
+        fi
+    done
+}
+
 # Reuse an existing configuration by default. A new or cleaned tree,
 # or explicitly supplied configure arguments, requires full setup.
 if [ -f Makefile ] && [ -f config.status ] && ((${#configure_args[@]} == 0)); then
@@ -350,8 +486,8 @@ if [ "$incremental" = no ]; then
 fi
 
 if [ "$incremental" = yes ]; then
-    if [ -n "$only_component" ] && { [ "$with_sdl" = yes ] || [ "$with_libpng" = yes ]; }; then
-        echo "--only-COMPONENT cannot be combined with --with-sdl or --with-libpng." >&2
+    if [ -n "$only_component" ] && { [ "$with_sdl" = yes ] || [ "$with_sdl2" = yes ] || [ "$with_libpng" = yes ]; }; then
+        echo "--only-COMPONENT cannot be combined with --with-sdl, --with-sdl2, or --with-libpng." >&2
         exit 1
     fi
 
@@ -380,23 +516,33 @@ if [ "$incremental" = yes ]; then
     if [ -n "$only_component" ]; then
         case "$only_component" in
             sdl)
-                apply_sdl_compat_patch || exit 1
-                echo "Rebuilding bundled SDL 1.x"
-                (cd vs/sdl && ./build-dosbox.sh) || exit 1
-                echo "Rebuilding bundled SDL_net 1.x"
-                (cd vs/sdlnet && ./build-dosbox.sh) || exit 1
+                apply_sdl_compat_patch || exit $?
+                build_bundled_component sdl "bundled SDL 1.x" \
+                    libSDL.a libSDLmain.a || exit $?
+                build_bundled_component sdlnet "bundled SDL_net 1.x" \
+                    libSDL_net.a || exit $?
+                ;;
+            sdl2)
+                build_bundled_component sdl2 "bundled SDL2" \
+                    libSDL2.a libSDL2main.a || exit $?
+                build_bundled_component sdl2net "bundled SDL2_net" \
+                    libSDL2_net.a || exit $?
+                ;;
+            sdl2net)
+                build_bundled_component sdl2net "bundled SDL2_net" \
+                    libSDL2_net.a || exit $?
                 ;;
             sdlnet)
-                echo "Rebuilding bundled SDL_net 1.x"
-                (cd vs/sdlnet && ./build-dosbox.sh) || exit 1
+                build_bundled_component sdlnet "bundled SDL_net 1.x" \
+                    libSDL_net.a || exit $?
                 ;;
             libpng)
-                echo "Rebuilding bundled static libpng"
-                (cd vs/libpng && ./build-dosbox.sh) || exit 1
+                build_bundled_component libpng "bundled static libpng" \
+                    libpng.a || exit $?
                 ;;
             include)
                 echo "Building include component"
-                make --no-print-directory -C include -j"$(nproc)" || exit 1
+                make --no-print-directory -C include -j"$(nproc)" || exit $?
                 ;;
             *)
                 # Restrict component names to a single existing src subdirectory.
@@ -407,46 +553,63 @@ if [ "$incremental" = yes ]; then
                     exit 1
                 fi
                 echo "Incrementally building src/$only_component for $triplet (no final link)"
-                make --no-print-directory -C "src/$only_component" -j"$(nproc)" || exit 1
+                make --no-print-directory -C "src/$only_component" -j"$(nproc)" || exit $?
                 ;;
         esac
-        exit 0
+        # Propagate the status of the selected component build.
+        exit $?
     fi
 
-    # Reuse bundled libraries when present. A configured Makefile alone does
-    # not guarantee that their static archives have been built.
-    sdl_lib_dir="$(pwd)/vs/sdl/linux-host/lib"
-    sdlnet_lib_dir="$(pwd)/vs/sdlnet/linux-host/lib"
-    need_sdl=no
-    need_sdlnet=no
-
-    if [ "$with_sdl" = yes ] ||
-       [ ! -f "$sdl_lib_dir/libSDL.a" ] ||
-       [ ! -f "$sdl_lib_dir/libSDLmain.a" ]; then
-        need_sdl=yes
-        need_sdlnet=yes
-    elif [ ! -f "$sdlnet_lib_dir/libSDL_net.a" ]; then
-        need_sdlnet=yes
-    fi
-
-    if [ "$need_sdl" = yes ]; then
-        apply_sdl_compat_patch || exit 1
-        echo "Building bundled SDL (requested or missing archive)"
-        (cd vs/sdl && ./build-dosbox.sh) || exit 1
-        for archive in libSDL.a libSDLmain.a; do
-            if [ ! -f "$sdl_lib_dir/$archive" ]; then
-                echo "SDL build did not produce $sdl_lib_dir/$archive" >&2
+    # Select the SDL family explicitly when requested. The two families
+    # have separate build and install directories.
+    if [ "$with_sdl2" = yes ]; then
+        echo "Rebuilding bundled SDL2 and SDL2_net"
+        (cd vs/sdl2 && ./build-dosbox.sh) || exit 1
+        (cd vs/sdl2net && ./build-dosbox.sh) || exit 1
+        for archive in libSDL2.a libSDL2main.a; do
+            if [ ! -f "vs/sdl2/linux-host/lib/$archive" ]; then
+                echo "SDL2 build did not produce $archive" >&2
                 exit 1
             fi
         done
-    fi
-
-    if [ "$need_sdlnet" = yes ]; then
-        echo "Building bundled SDL_net (requested or missing archive)"
-        (cd vs/sdlnet && ./build-dosbox.sh) || exit 1
-        if [ ! -f "$sdlnet_lib_dir/libSDL_net.a" ]; then
-            echo "SDL_net build did not produce $sdlnet_lib_dir/libSDL_net.a" >&2
+        if [ ! -f vs/sdl2net/linux-host/lib/libSDL2_net.a ]; then
+            echo "SDL2_net build did not produce libSDL2_net.a" >&2
             exit 1
+        fi
+    else
+        sdl_lib_dir="$(pwd)/vs/sdl/linux-host/lib"
+        sdlnet_lib_dir="$(pwd)/vs/sdlnet/linux-host/lib"
+        need_sdl=no
+        need_sdlnet=no
+
+        if [ "$with_sdl" = yes ] ||
+           [ ! -f "$sdl_lib_dir/libSDL.a" ] ||
+           [ ! -f "$sdl_lib_dir/libSDLmain.a" ]; then
+            need_sdl=yes
+            need_sdlnet=yes
+        elif [ ! -f "$sdlnet_lib_dir/libSDL_net.a" ]; then
+            need_sdlnet=yes
+        fi
+
+        if [ "$need_sdl" = yes ]; then
+            apply_sdl_compat_patch || exit 1
+            echo "Building bundled SDL (requested or missing archive)"
+            (cd vs/sdl && ./build-dosbox.sh) || exit 1
+            for archive in libSDL.a libSDLmain.a; do
+                if [ ! -f "$sdl_lib_dir/$archive" ]; then
+                    echo "SDL build did not produce $sdl_lib_dir/$archive" >&2
+                    exit 1
+                fi
+            done
+        fi
+
+        if [ "$need_sdlnet" = yes ]; then
+            echo "Building bundled SDL_net (requested or missing archive)"
+            (cd vs/sdlnet && ./build-dosbox.sh) || exit 1
+            if [ ! -f "$sdlnet_lib_dir/libSDL_net.a" ]; then
+                echo "SDL_net build did not produce $sdlnet_lib_dir/libSDL_net.a" >&2
+                exit 1
+            fi
         fi
     fi
 
@@ -469,7 +632,9 @@ if [ "$incremental" = yes ]; then
     exit $?
 fi
 
-apply_sdl_compat_patch || exit 1
+if [ "$with_sdl2" != yes ]; then
+    apply_sdl_compat_patch || exit 1
+fi
 
 echo "Compiling our internal libpng"
 (cd vs/libpng && ./build-dosbox.sh) || exit 1
@@ -478,8 +643,18 @@ if [ ! -f "$png_prefix/lib/libpng.a" ]; then
     exit 1
 fi
 
+if [ "$with_sdl2" = yes ]; then
+    echo "Building bundled SDL2 and SDL2_net"
+    (cd vs/sdl2 && ./build-dosbox.sh) || exit 1
+    (cd vs/sdl2net && ./build-dosbox.sh) || exit 1
+fi
+
 # Do not forward '32': the original ./build treats it as a Linux -m32 build.
-./build "--host=$triplet" "${configure_args[@]}" || exit $?
+if [ "$with_sdl2" = yes ]; then
+    ./build "--host=$triplet" --enable-sdl2 "${configure_args[@]}" || exit $?
+else
+    ./build "--host=$triplet" "${configure_args[@]}" || exit $?
+fi
 if [ "$strip_executable" = yes ]; then
     strip_dosbox_executable
 fi
